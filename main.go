@@ -17,7 +17,7 @@ import (
 	"github.com/jessevdk/go-flags"
 	"github.com/jung-kurt/gofpdf"
 	"gopkg.in/mgo.v2/bson"
-	"statsconsultant/models"
+	"github.com/raubreywhite/commander_backend/models"
 
 	"io"
 	"io/ioutil"
