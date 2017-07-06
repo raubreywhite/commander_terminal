@@ -2,38 +2,102 @@ package main
 
 import (
 	// Standard library packages
-	"bufio"
+  "gopkg.in/mgo.v2/bson"
 	"bytes"
 	"encoding/json"
+	"bufio"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sort"
 	"time"
 	"regexp"
 
 	"github.com/jroimartin/gocui"
-	"github.com/jessevdk/go-flags"
 	"github.com/jung-kurt/gofpdf"
-	"gopkg.in/mgo.v2/bson"
-	"github.com/raubreywhite/commander_backend/models"
 
 	"io"
 	"io/ioutil"
 	"log"
 )
 
-var u = models.User{}
-var ps = []models.Project{}
-var es = []models.Entry{}
+type (
+	Bill struct {
+		Year int
+		Month int
+		Billed string
+		MoneyBilled int
+		MoneyReceived int
+	}
+
+	// User represents the structure of our resource
+	User struct {
+		Id     bson.ObjectId `json:"id" bson:"_id"`
+		Session     string `json:"session" bson:"session"`
+		Email  string        `json:"email" bson:"email"`
+		Name   string        `json:"name" bson:"name"`
+		Password    string           `json:"password" bson:"password"`
+		Projects    []Project           `json:"projects" bson:"projects"`
+		Success bool `json:"success" bson:"success"`
+		LoggedIn bool `json:"loggedin" bson:"loggedin"`
+	}
+
+	UserSession struct {
+		Id     bson.ObjectId `json:"id" bson:"_id"`
+		Session     string `json:"session" bson:"session"`
+		Success bool `json:"success"`
+	}
+
+	Project struct {
+		Name   string        `json:"name" bson:"name"`
+		Client   string        `json:"client" bson:"client"`
+		Entries    []Entry           `json:"entries" bson:"entries"`
+		Bills []Bill `json:"bills" bson:"bills"`
+	}
+
+	Entry struct {
+		Session     string `json:"session" bson:"session"`
+		Status   string        `json:"status" bson:"status"`
+		Rate   int        `json:"rate" bson:"rate"`
+		StartYear   int        `json:"startYear" bson:"startYear"`
+		StartMonth   int        `json:"startMonth" bson:"startMonth"`
+		StartDay   int        `json:"startDay" bson:"startDay"`
+		StartHour   int        `json:"startHour" bson:"startHour"`
+		StartMin   int        `json:"startMin" bson:"startMin"`
+		EndYear   int        `json:"endYear" bson:"endYear"`
+		EndMonth   int        `json:"endMonth" bson:"endMonth"`
+		EndDay   int        `json:"endDay" bson:"endDay"`
+		EndHour   int        `json:"endHour" bson:"endHour"`
+		EndMin   int        `json:"endMin" bson:"endMin"`
+		Category   string        `json:"category" bson:"category"`
+		Subcategory   string        `json:"Subcategory" bson:"Subcategory"`
+		Info   string        `json:"name" bson:"name"`
+	}
+)
+
+
+var email = "r@rwhite.no"
+var password = "hello"
+
+var u = User{LoggedIn:false}
+var ps = []Project{}
+var es = []Entry{}
 var level = "main"
 var editing = "nothing"
 var client = "Unknown"
 var cs = []string{}
 var psGivenClient = []int{}
+var bsGivenProject = []int{}
+
+
+var clientPos = 0
 var projectPos = 0
 var entryPos = 0
+var billPos = 0
+
+
 
 func PadLeft(str string, length int) string {
 	for {
@@ -95,34 +159,197 @@ func IncreaseInts(year int, month int, day int, hour int, min int, incMin int)(i
 	return ConvertTimeToInts(t)
 }
 
+// WORKING WITH DATABASE
 
-func EntryToRow() []string {
+func writeUser(){
 
-	rate := strconv.Itoa(es[entryPos].Rate)
+	outputjson,_:=json.Marshal(u)
+
+	// delete file
+	_ = os.Remove("output.json")
+	
+  //open the file
+  myfile,errorprocess := os.OpenFile("output.json",os.O_WRONLY|os.O_CREATE,0666)
+  defer myfile.Close()
+  //check for errors
+  if errorprocess!=nil{
+    fmt.Println("Oops, there is an error while opening the file")
+  }
+ 
+  //define the 'string writer'
+  filewriter:=bufio.NewWriter(myfile)
+ 
+  //write the JSON string. First we need to convert the outputjson to string, and then write it
+  filewriter.WriteString(string(outputjson))
+ 
+  //you know what to do
+  filewriter.Flush()
+}
+
+func readUser() bool{
+  //open the file
+  myfile,err := os.OpenFile("output.json",os.O_RDONLY,0666)
+  defer myfile.Close()
+  //check for errors
+  if err!=nil{
+    fmt.Println("Oops, there is an error while opening the file")
+		return false
+  }
+
+	jsonParser := json.NewDecoder(myfile)
+	jsonParser.Decode(&u)
+	fmt.Println(u)
+	return true
+}
+
+func createUser() {
+	u.Email = email
+	u.Password = password
+
+	jsonStr, err := json.Marshal(u)
+	req, err := http.NewRequest("POST", "http://10.0.1.10:8888/create/users", bytes.NewBuffer(jsonStr))
+	req.Header.Set("X-Custom-Header", "myvalue")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	json.NewDecoder(resp.Body).Decode(&u)
+
+	if u.Success {
+		downloadUser()
+		writeUser()
+	}
+}
+
+func uploadUser() {
+	ProcessProjectsBills()
+
+	jsonStr, err := json.Marshal(u)
+	req, err := http.NewRequest("POST", "http://10.0.1.10:8888/edit/users", bytes.NewBuffer(jsonStr))
+	req.Header.Set("X-Custom-Header", "myvalue")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	json.NewDecoder(resp.Body).Decode(&u)
+
+	establishProjectsGivenClient()
+
+	writeUser()
+}
+
+func downloadUser(){
+	jsonStr, err := json.Marshal(u)
+	req, err := http.NewRequest("POST", "http://10.0.1.10:8888/login", bytes.NewBuffer(jsonStr))
+	req.Header.Set("X-Custom-Header", "myvalue")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	json.NewDecoder(resp.Body).Decode(&u)
+
+	if u.LoggedIn {
+		establishProjectsGivenClient()
+		ProcessProjectsBills()
+		establishBillsGivenProject()
+	}
+}
+
+func createProject() {
+	bills := []Bill{}
+	currentYear, _, _, _, _ := GetIntsNow()
+
+	for y := currentYear-1; y<=currentYear+5; y++ {
+		for m := 1; m<=12; m++ {
+			b:=Bill{y, m, "", 0, 0}
+			bills = append(bills, b)
+		}
+	}
+	p := Project{Name: "A new project", Client: "Unknown", Bills: bills}
+	u.Projects = append(u.Projects, p)
+	uploadUser()
+}
+
+func createEntry(arg string) {
+	currentYear, currentMonth, currentDay, currentHour, currentMin := GetIntsNow()
+	endYear, endMonth, endDay, endHour, endMin := IncreaseInts(currentYear, currentMonth, currentDay, currentHour, currentMin, 60)
+
+	e := Entry{Session: u.Session,
+		Status: "",
+		Rate: 800,
+		StartYear: currentYear,
+		StartMonth: currentMonth,
+		StartDay : currentDay,
+		StartHour: currentHour,
+		StartMin: currentMin,
+		EndYear: endYear,
+		EndMonth: endMonth,
+		EndDay : endDay,
+		EndHour : endHour,
+		EndMin : endMin,
+		Category: "Category",
+		Subcategory: "Subcategory",
+		Info: "A new entry"}
+
+	u.Projects[projectPos].Entries = append(u.Projects[projectPos].Entries, e)
+
+	uploadUser()
+}
+
+func deleteEntry(){
+	u.Projects[projectPos].Entries = append(u.Projects[projectPos].Entries[:entryPos], u.Projects[projectPos].Entries[entryPos+1:]...)
+
+	uploadUser()
+}
+
+func deleteProject(){
+	u.Projects = append(u.Projects[:projectPos],u.Projects[projectPos+1:]...)
+
+	uploadUser()
+}
+
+
+
+// CONVERT DATA TO USEFUL THINGS TO DISPLAY
+
+func EntryToRowInternal(e Entry) []string {
+	rate := strconv.Itoa(e.Rate)
 	if rate=="" {
 		rate= " "
 	}
 
-	startTime := ConvertIntsToString(es[entryPos].StartYear, es[entryPos].StartMonth, es[entryPos].StartDay, es[entryPos].StartHour, es[entryPos].StartMin)
+	startTime := ConvertIntsToString(e.StartYear, e.StartMonth, e.StartDay, e.StartHour, e.StartMin)
 
-	endTime := ConvertIntsToString(es[entryPos].EndYear, es[entryPos].EndMonth, es[entryPos].EndDay, es[entryPos].EndHour, es[entryPos].EndMin)
+	endTime := ConvertIntsToString(e.EndYear, e.EndMonth, e.EndDay, e.EndHour, e.EndMin)
 
-	category := es[entryPos].Category
+	category := e.Category
 
-	subcategory := es[entryPos].Subcategory
+	subcategory := e.Subcategory
 
-	info := es[entryPos].Info
+	info := e.Info
 
-	status := es[entryPos].Status
+	status := e.Status
 	if status=="" {
 		status = " "
 	}
 
-	startDate := ConvertIntsToStringDate(es[entryPos].StartYear, es[entryPos].StartMonth, es[entryPos].StartDay)
+	startDate := ConvertIntsToStringDate(e.StartYear, e.StartMonth, e.StartDay)
 
-	duration := ConvertIntsToTime(es[entryPos].EndYear, es[entryPos].EndMonth, es[entryPos].EndDay, es[entryPos].EndHour, es[entryPos].EndMin).Sub(ConvertIntsToTime(es[entryPos].StartYear, es[entryPos].StartMonth, es[entryPos].StartDay, es[entryPos].StartHour, es[entryPos].StartMin)).Hours()
+	duration := ConvertIntsToTime(e.EndYear, e.EndMonth, e.EndDay, e.EndHour, e.EndMin).Sub(ConvertIntsToTime(e.StartYear, e.StartMonth, e.StartDay, e.StartHour, e.StartMin)).Hours()
 
-	money := strconv.FormatFloat(float64(es[entryPos].Rate)*duration,'f', 0, 64)
+	money := strconv.FormatFloat(float64(e.Rate)*duration,'f', 0, 64)
 
 	return []string{
 		rate,
@@ -131,20 +358,213 @@ func EntryToRow() []string {
 		category,
 		subcategory,
 		info,
-		status,
 		money,
 		startDate,
 		strconv.FormatFloat(duration,'f', 2, 64)}
 }
 
+
+func EntryToRow() []string {
+	e := u.Projects[projectPos].Entries[entryPos]
+
+	return EntryToRowInternal(e)
+}
+
+func BillToRow() []string {
+
+	b := u.Projects[projectPos].Bills[billPos]
+
+	return []string{
+		b.Billed,
+		strconv.Itoa(b.Year)+"-"+strconv.Itoa(b.Month),
+		strconv.Itoa(b.MoneyBilled),
+		strconv.Itoa(b.MoneyReceived)}
+}
+
 func ProjectToRow() []string {
 
-	client := ps[projectPos].Client
-	name := ps[projectPos].Name
+	client := u.Projects[projectPos].Client
+	name := u.Projects[projectPos].Name
 
 	return []string{
 		name,
 		client}
+}
+
+// GRAPHICS
+
+func printClients(v *gocui.View) error {
+	v.Clear()
+	if len(cs) == 0 {
+
+	} else {
+		for index, c := range cs {
+			star := ""
+			if index == clientPos {
+				star = "** "
+			}
+			fmt.Fprintf(v,"%v%v\n",star,c)
+		}
+	}
+	return nil
+}
+
+func printProjects_val(v *gocui.View, pos int) error {
+	origProjectPos := projectPos
+	v.Clear()
+	if len(u.Projects) == 0 {
+
+	} else {
+		for _, index := range psGivenClient {
+			projectPos=index
+			x := ProjectToRow()
+
+			star := ""
+			if projectPos == origProjectPos {
+				star = "** "
+			}
+			fmt.Fprintf(v,"%v%v\n",star,x[pos])
+			}
+	}
+	projectPos = origProjectPos
+	return nil
+}
+
+func printEntries_val(v *gocui.View, pos int) error {
+	v.Clear()
+	if len(u.Projects[projectPos].Entries) == 0 {
+
+	} else {
+		for index, _ := range u.Projects[projectPos].Entries {
+			entryPos=index
+			x := EntryToRow()
+			fmt.Fprintf(v,"%v\n",x[pos])
+			}
+	}
+	return nil
+}
+
+func printBills_val(v *gocui.View, pos int) error {
+
+	v.Clear()
+	if len(bsGivenProject) == 0 {
+
+	} else {
+		for _, index := range bsGivenProject {
+			billPos = index
+			x := BillToRow()
+
+			fmt.Fprintf(v,"%v\n",x[pos])
+		}
+
+	}
+	return nil
+}
+
+
+func ProcessProjectBill(pos int){
+	for i, _ := range u.Projects[pos].Bills {
+		u.Projects[pos].Bills[i].MoneyBilled = 0
+		money := 0.0
+		for _ , e := range u.Projects[pos].Entries {
+			if u.Projects[pos].Bills[i].Year == e.StartYear && u.Projects[pos].Bills[i].Month == e.StartMonth {
+				temp := EntryToRowInternal(e)
+				tempMoney, _ := strconv.ParseFloat(temp[6],64)
+				money += tempMoney
+			}
+			u.Projects[pos].Bills[i].MoneyBilled = int(money)
+		}
+	}
+}
+
+func ProcessProjectsBills(){
+	for i, _ := range u.Projects {
+		ProcessProjectBill(i)
+	}
+}
+
+func establishBillsGivenProject(){
+
+	bsGivenProject = []int{}
+
+	// create client list
+	for i, b := range u.Projects[projectPos].Bills {
+		if b.MoneyBilled > 0.0 {
+			bsGivenProject = append(bsGivenProject, i)
+		}
+	}
+}
+
+func establishProjectsGivenClient(){
+	if len(u.Projects)==0 {
+		clientPos = 0
+		createProject()
+	}
+	//c = "Unknown"
+	cs = []string{}
+	psGivenClient = []int{}
+
+	// create client list
+	for _, p := range u.Projects {
+		unique := true
+		for _, x := range cs {
+			if x == p.Client {
+				unique = false
+			}
+		}
+		if unique {
+			cs = append(cs, p.Client)
+		}
+	}
+	sort.Strings(cs)
+	for clientPos >= len(cs) {
+		clientPos--
+	}
+	client = cs[clientPos]
+	// create project list
+	for i, p := range u.Projects {
+		if client == p.Client {
+			psGivenClient = append(psGivenClient, i)
+		}
+	}
+
+}
+
+
+
+
+
+func refreshProjects(g *gocui.Gui, v *gocui.View) error {
+	var err error
+	original := v.Name()
+	establishProjectsGivenClient()
+	establishBillsGivenProject()
+
+	v, err = g.SetCurrentView("clients")
+	printClients(v)
+
+	for i, n := range [...]string{"projects_name", "projects_client"}   {
+		v, err = g.SetCurrentView(n)
+		printProjects_val(v,i)
+	}
+
+	for i, n := range [...]string{"projects_billed" ,"projects_month","projects_moneybilled","projects_moneyreceived"} {
+		v, err = g.SetCurrentView(n)
+		printBills_val(v,i)
+	}
+	v, err = g.SetCurrentView(original)
+	return err
+}
+
+func refreshEntries(g *gocui.Gui, v *gocui.View) error {
+	var err error
+	original := v.Name()
+	for i, n := range [...]string{"entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_money"}   {
+		v, err = g.SetCurrentView(n)
+		printEntries_val(v,i)
+	}
+	v, err = g.SetCurrentView(original)
+	return err
 }
 
 type YearMonth struct {
@@ -166,13 +586,11 @@ func retainchars(str, chr string) string {
 }
 
 func genPDF() {
-
 	var yearMonths []YearMonth
-	for pIndex, p := range ps {
+	for pIndex, p := range u.Projects {
 		projectPos = pIndex
-		downloadEntries()
 
-		for _, e := range es {
+		for _, e := range u.Projects[projectPos].Entries {
 			eYM := YearMonth {e.StartYear, e.StartMonth, p.Client, p.Name, projectPos, false}
 			unique := true
 			for _, x := range yearMonths {
@@ -185,6 +603,8 @@ func genPDF() {
 			}
 		}
 	}
+  fmt.Println("GENPDF")
+  fmt.Println(yearMonths)
 	for _, ymClientYearMonth := range yearMonths {
 	//	ymClientYearMonth :=  yearMonths[0]
 
@@ -213,10 +633,11 @@ func genPDF() {
 			if ymProjectPos.Client != ymClientYearMonth.Client {
 				continue
 			}
+
 			ymProjectPos.Processed = true
+      fmt.Println(ymProjectPos)
 
 			projectPos = ymProjectPos.ProjectPos
-			downloadEntries()
 
 			pdf.SetFont("Helvetica", "B", 12)
 			_, lineHt := pdf.GetFontSize()
@@ -240,7 +661,7 @@ func genPDF() {
 			pdf.Ln(-1)
 			// Data
 			pdf.SetFont("Helvetica", "", 8)
-			for index, e := range es {
+			for index, e := range u.Projects[projectPos].Entries {
 				entryPos=index
 				if ymProjectPos.Year != e.StartYear {
 					continue
@@ -250,15 +671,15 @@ func genPDF() {
 				}
 				x := EntryToRow()
 				fmt.Println(x)
-				temp, _ := strconv.Atoi(x[7])
+				temp, _ := strconv.Atoi(x[6])
 				billed = billed + temp
-				temp2, _ := strconv.ParseFloat(x[9], 64)
+				temp2, _ := strconv.ParseFloat(x[8], 64)
 				hours = hours + temp2
 
-				pdf.CellFormat(w[0], 6, x[8], "L", 0, "C", false, 0, "")
-				pdf.CellFormat(w[1], 6, x[9], "", 0, "C", false, 0, "")
+				pdf.CellFormat(w[0], 6, x[7], "L", 0, "C", false, 0, "")
+				pdf.CellFormat(w[1], 6, x[8], "", 0, "C", false, 0, "")
 				pdf.CellFormat(w[2], 6, x[0], "", 0, "C", false, 0, "")
-				pdf.CellFormat(w[3], 6, x[7], "", 0, "C", false, 0, "")
+				pdf.CellFormat(w[3], 6, x[6], "", 0, "C", false, 0, "")
 				pdf.CellFormat(w[4], 6, x[3], "", 0, "C", false, 0, "")
 				pdf.CellFormat(w[5], 6, x[4], "", 0, "C", false, 0, "")
 				pdf.CellFormat(w[6], 6, x[5], "", 0, "", false, 0, "")
@@ -290,544 +711,24 @@ func genPDF() {
 	}
 }
 
-func uploadUser() {
-	jsonStr, err := json.Marshal(u)
-	req, err := http.NewRequest("POST", "http://localhost:8080/edit/users", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&u)
-}
-
-func uploadProject() {
-	jsonStr, err := json.Marshal(ps[projectPos])
-	req, err := http.NewRequest("POST", "http://localhost:8080/edit/projects", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&ps[projectPos])
-	establishProjectsGivenClient()
-}
-
-func uploadEntry() {
-	jsonStr, err := json.Marshal(es[entryPos])
-	req, err := http.NewRequest("POST", "http://localhost:8080/edit/entries", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&es[entryPos])
-}
-
-func createProject() {
-	p := models.Project{Session: u.Session, Name: "A new project", Client: "Unknown"}
-
-	jsonStr, err := json.Marshal(p)
-	req, err := http.NewRequest("POST", "http://localhost:8080/create/projects", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&p)
-
-	ps = append(ps, p)
-	u.Projects = append(u.Projects, p.Id)
-	uploadUser()
-
-	if !u.LoggedIn {
-		fmt.Println("Failed login")
-	}
-	establishProjectsGivenClient()
-}
-
-
-
-func createEntry(arg string) {
-	//name := "A new entry"
-
-	currentYear, currentMonth, currentDay, currentHour, currentMin := GetIntsNow()
-	endYear, endMonth, endDay, endHour, endMin := IncreaseInts(currentYear, currentMonth, currentDay, currentHour, currentMin, 60)
-
-	e := models.Entry{Session: u.Session,
-		Status: "",
-		Rate: 800,
-		StartYear: currentYear,
-		StartMonth: currentMonth,
-		StartDay : currentDay,
-		StartHour: currentHour,
-		StartMin: currentMin,
-		EndYear: endYear,
-		EndMonth: endMonth,
-		EndDay : endDay,
-		EndHour : endHour,
-		EndMin : endMin,
-		Category: "Category",
-		Subcategory: "Subcategory",
-		Info: "A new entry"}
-
-	jsonStr, err := json.Marshal(e)
-	req, err := http.NewRequest("POST", "http://localhost:8080/create/entries", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&e)
-
-	es = append(es, e)
-	ps[projectPos].Entries = append(ps[projectPos].Entries, e.Id)
-	uploadProject()
-}
-
-func getProject(Id bson.ObjectId) models.Project {
-	p := models.Project{Session: u.Session, Id: Id}
-
-	jsonStr, err := json.Marshal(p)
-	req, err := http.NewRequest("POST", "http://localhost:8080/get/projects", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&p)
-
-	return (p)
-}
-
-func getEntry(Id bson.ObjectId) models.Entry {
-	e := models.Entry{Session: u.Session, Id: Id}
-
-	jsonStr, err := json.Marshal(e)
-	req, err := http.NewRequest("POST", "http://localhost:8080/get/entries", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&e)
-
-	return (e)
-}
-
-func establishProjectsGivenClient(){
-	//c = "Unknown"
-	cs = []string{}
-	psGivenClient = []int{}
-
-	for i, p := range ps {
-		unique := true
-		for _, x := range cs {
-			if x == p.Client {
-				unique = false
-			}
-		}
-		if unique {
-			cs = append(cs, p.Client)
-		}
-
-		if client == p.Client {
-			psGivenClient = append(psGivenClient, i)
-		}
-	}
-}
-
-func downloadProjects() {
-	ps = []models.Project{}
-
-	for _, Id := range u.Projects {
-		p := getProject(Id)
-		if(p.Client==""){
-			p.Client = "Unknown"
-		}
-		ps = append(ps, p)
-	}
-	establishProjectsGivenClient()
-}
-
-func printProjects() {
-	if len(ps) == 0 {
-		fmt.Println("No projects")
-	}
-	for index, p := range ps {
-		fmt.Print(index, ": ", p.Name, "\n")
-	}
-}
-
-func downloadEntries() {
-	es = []models.Entry{}
-	for _, Id := range ps[projectPos].Entries {
-		e := getEntry(Id)
-		es = append(es, e)
-	}
-}
-
-func printEntries() {
-	if len(es) == 0 {
-		fmt.Println("No entries")
-	}
-	for index, e := range es {
-		fmt.Print(index, ": ", e.Info, "\n")
-	}
-}
-
-func deleteEntry(){
-	e := models.Entry{Session: u.Session, Id: es[entryPos].Id}
-
-	jsonStr, err := json.Marshal(e)
-	req, err := http.NewRequest("POST", "http://localhost:8080/delete/entries", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	es = append(es[:entryPos],es[entryPos+1:]...)
-	ps[projectPos].Entries = append(ps[projectPos].Entries[:entryPos],ps[projectPos].Entries[entryPos+1:]...)
-	uploadProject()
-
-	entryPos = 0
-}
-
-
-func deleteProject(){
-	downloadEntries()
-	for len(ps[projectPos].Entries) > 0 {
-		entryPos = 0
-		deleteEntry()
-	}
-	p := models.Project{Session: u.Session, Id: ps[projectPos].Id}
-
-	jsonStr, err := json.Marshal(p)
-	req, err := http.NewRequest("POST", "http://localhost:8080/delete/projects", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-
-	ps = append(ps[:projectPos],ps[projectPos+1:]...)
-	u.Projects = append(u.Projects[:projectPos],u.Projects[projectPos+1:]...)
-	uploadUser()
-
-	entryPos = 0
-}
-
-
-func projects() bool {
-	exit := false
-	var input string
-	fmt.Println("projects_name")
-	if len(u.Projects) > 0 {
-		fmt.Println(len(u.Projects), "projects:")
-
-		ps = nil
-		for index, Id := range u.Projects {
-			p := getProject(Id)
-			ps = append(ps, p)
-			fmt.Print(index, ": ", p.Name, "\n")
-		}
-	}
-
-	for !exit {
-		if len(u.Projects) == 0 {
-			fmt.Println("No projects")
-		}
-		fmt.Print("p> ")
-		fmt.Scan(&input)
-		switch {
-		case input == "c":
-			createProject()
-		case input == "g":
-			genPDF()
-		case input == "m":
-			exit = true
-		case input == "q":
-			return true
-		default:
-			fmt.Println("Invalid request. 'm' for main, 'q' for exit")
-		}
-	}
-	return false
-}
 
 func loginInternal(email string, password string) {
-	u = models.User{Email: email, Password: password}
-
-	jsonStr, err := json.Marshal(u)
-	req, err := http.NewRequest("POST", "http://localhost:8080/login", bytes.NewBuffer(jsonStr))
-	req.Header.Set("X-Custom-Header", "myvalue")
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	json.NewDecoder(resp.Body).Decode(&u)
-
-	if !u.LoggedIn {
-		fmt.Println("Failed login")
-	} else {
-		downloadProjects()
-	}
+	u = User{Email: email, Password: password}
+	downloadUser()
 }
-
-func login() {
-	var email string
-	var password string
-	fmt.Print("Email: ")
-	fmt.Scan(&email)
-	fmt.Print("Password: ")
-	fmt.Scan(&password)
-
-	loginInternal(email, password)
-}
-
-func parseFlags(s []string) (string, string) {
-	if len(s) == 0 {
-		return "", ""
-	} else if len(s) == 1 {
-		return s[0], ""
-	}
-	command := s[0]
-	args := ""
-	for i, val := range s {
-		if i == 0 {
-			continue
-		} else if i == 1 {
-			args = val
-		} else {
-			args = args + " " + val
-		}
-	}
-	return command, args
-}
-
-func ls(args string) {
-	switch {
-	case level == "main":
-		printProjects()
-	case level == "project":
-		printEntries()
-	}
-}
-
-func cd(args string) {
-	switch {
-	case args == "":
-	  level = "main"
-	case args == "..":
-		switch {
-		case level == "project":
-			level = "main"
-		}
-	default:
-		temp, err := strconv.ParseInt(args, 10, 10)
-		if err == nil {
-			n := int(temp)
-			if n >= 0 && n < len(ps) {
-				level = "project"
-				projectPos = n
-				downloadEntries()
-			} else {
-				fmt.Println("error")
-			}
-		} else {
-			fmt.Println(err)
-		}
-	}
-}
-
-func touch(args string) {
-	switch {
-	case level == "main":
-		createProject()
-	case level == "project":
-		createEntry("")
-	}
-}
-
-func rm(args string) {
-	switch {
-	case level == "project" && args=="project":
-		deleteProject()
-		level = "main"
-	case level == "project" && args=="":
-		fmt.Println("'rm -f project' to delete this project")
-	case level == "project":
-		temp, err := strconv.ParseInt(args, 10, 10)
-		if err == nil {
-			n := int(temp)
-			if n >= 0 && n < len(es) {
-				entryPos = n
-				deleteEntry()
-			} else {
-				fmt.Println("error")
-			}
-		}
-	}
-}
-
-func mainx() {
-
-	exit := false
-	scanner := bufio.NewScanner(os.Stdin)
-	var input string
-
-	loginInternal("r@rwhite.no", "hello")
-
-	for !exit {
-		switch {
-		case level == "main":
-			fmt.Print(u.Email, "> ")
-		case level == "project":
-			fmt.Print("Project ", projectPos, "> ")
-		default:
-			fmt.Print("> ")
-		}
-		scanner.Scan()
-		input = scanner.Text()
-
-		var opts struct {
-			List   bool   `short:"l" long:"list" description:"list"`
-			Create bool   `short:"c" long:"create" description:"create"`
-			Client string `long:"client" description:"client"`
-			Force  bool   `short:"f" long:"force" description:"force"`
-			Name   string `long:"name" description:"name"`
-		}
-
-		args := strings.Split(input, " ")
-		args, _ = flags.ParseArgs(&opts, args)
-		command, argsx := parseFlags(args)
-
-		switch {
-		case u.LoggedIn:
-			switch {
-			case command == "cd":
-				cd(argsx)
-			case command == "ls":
-				ls(argsx)
-			case command == "rm":
-				if !opts.Force {
-					fmt.Println("Needs -f flag to rm")
-				} else {
-					rm(argsx)
-				}
-			case command == "touch":
-				touch(argsx)
-			case command == "q":
-				exit = true
-			}
-		case command == "l":
-			login()
-		case command == "q":
-			exit = true
-		default:
-			fmt.Println("Invalid request. 'l' for login, 'q' for exit")
-		}
-	}
-
-	fmt.Println("Goodbye")
-}
-
-func printProjectsx(v *gocui.View) {
-	v.Clear()
-	if len(ps) == 0 {
-		fmt.Fprintln(v,"No projects available. Create a new one?")
-	} else {
-		for index, p := range ps {
-			fmt.Fprint(v,index, ": ", p.Name, "\n")
-		}
-		fmt.Fprintln(v,"Create new project")
-	}
-}
-
-func printEntriesx(v *gocui.View) error {
-	v.Clear()
-	if len(es) == 0 {
-		fmt.Fprintln(v,"No entries available. Create a new one?")
-	} else {
-		for index, _ := range es {
-			entryPos=index
-			x := EntryToRow()
-			fmt.Fprintf(v,"%v | %v | %v\n",x[0],x[1],x[2])
-			}
-
-		//	fmt.Fprint(v,index, ": ", e.Info, "\n")
-		//}
-		fmt.Fprintln(v,"Create new entry")
-	}
-	return nil
-}
-
 
 func selectProject(g *gocui.Gui, v *gocui.View) error {
 	_, cy := v.Cursor()
-	if(cy<len(ps)){
+	if(cy<len(u.Projects)){
 		projectPos=psGivenClient[cy]
-		downloadEntries()
 		return displayEntries(g,v)
-	}
-	return nil
-}
-
-func selectEntry(g *gocui.Gui, v *gocui.View) error {
-	_, cy := v.Cursor()
-	if(cy<len(es)){
-		return nil
-	} else if(cy>=len(es)){
-		createEntry("")
-		printEntriesx(v)
 	}
 	return nil
 }
 
 func guiNewProject(g *gocui.Gui, v *gocui.View) error {
 	createProject()
-	printProjectsx(v)
+	refreshProjects(g,v)
 	return nil
 }
 
@@ -836,9 +737,6 @@ func guiNewEntry(g *gocui.Gui, v *gocui.View) error {
 	refreshEntries(g,v)
 	return nil
 }
-
-
-
 
 func cursorDown(g *gocui.Gui, v *gocui.View) error {
 	if v != nil {
@@ -851,10 +749,21 @@ func cursorDown(g *gocui.Gui, v *gocui.View) error {
 		}
 	}
 	if v.Name()=="clients"{
-		_, cy := v.Cursor()
-		vb, _ := v.Line(cy)
-		client = vb
-		establishProjectsGivenClient()
+		cx, cy := v.Cursor()
+		for cy >= len(cs){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		clientPos = cy
+		refreshProjects(g,v)
+	}
+	if v.Name()=="projects_name" || v.Name()=="projects_client" {
+		cx, cy := v.Cursor()
+		for cy >= len(psGivenClient){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		projectPos = psGivenClient[cy]
 		refreshProjects(g,v)
 	}
 	return nil
@@ -871,56 +780,25 @@ func cursorUp(g *gocui.Gui, v *gocui.View) error {
 		}
 	}
 	if v.Name()=="clients"{
-		_, cy := v.Cursor()
-		vb, _ := v.Line(cy)
-		client = vb
-		establishProjectsGivenClient()
+		cx, cy := v.Cursor()
+		for cy >= len(cs){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		clientPos = cy
+		refreshProjects(g,v)
+	}
+	if v.Name()=="projects_name" || v.Name()=="projects_client" {
+		cx, cy := v.Cursor()
+		for cy >= len(psGivenClient){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		projectPos = psGivenClient[cy]
 		refreshProjects(g,v)
 	}
 	return nil
 }
-
-func printEntries_val(v *gocui.View, pos int) error {
-	v.Clear()
-	if len(es) == 0 {
-
-	} else {
-		for index, _ := range es {
-			entryPos=index
-			x := EntryToRow()
-			fmt.Fprintf(v,"%v\n",x[pos])
-			}
-	}
-	return nil
-}
-
-func printProjects_val(v *gocui.View, pos int) error {
-	v.Clear()
-	if len(ps) == 0 {
-
-	} else {
-		for _, index := range psGivenClient {
-			projectPos=index
-			x := ProjectToRow()
-			fmt.Fprintf(v,"%v\n",x[pos])
-			}
-	}
-	return nil
-}
-
-func printClients(v *gocui.View) error {
-	v.Clear()
-	if len(cs) == 0 {
-
-	} else {
-		for _, c := range cs {
-			fmt.Fprintf(v,"%v\n",c)
-		}
-		establishProjectsGivenClient()
-	}
-	return nil
-}
-
 
 func guiNextEntryView(g *gocui.Gui, v *gocui.View) error {
 	var err error
@@ -938,24 +816,41 @@ func guiNextEntryView(g *gocui.Gui, v *gocui.View) error {
 		case v.Name()=="entries_subcategory":
 			v, err = g.SetCurrentView("entries_info")
 		case v.Name()=="entries_info":
-			v, err = g.SetCurrentView("entries_status")
-		case v.Name()=="entries_status":
 			v, err = g.SetCurrentView("entries_rate")
 		case v.Name()=="clients":
 			v, err = g.SetCurrentView("projects_name")
 		case v.Name()=="projects_name":
 			v, err = g.SetCurrentView("projects_client")
 		case v.Name()=="projects_client":
+			v, err = g.SetCurrentView("projects_billed")
+		case v.Name()=="projects_billed":
+			v, err = g.SetCurrentView("projects_month")
+		case v.Name()=="projects_month":
+			v, err = g.SetCurrentView("projects_moneybilled")
+		case v.Name()=="projects_moneybilled":
+			v, err = g.SetCurrentView("projects_moneyreceived")
+		case v.Name()=="projects_moneyreceived":
 			v, err = g.SetCurrentView("clients")
 	}
 	v.Highlight = true
 	v.SetCursor(cx, cy)
 
 	if v.Name()=="clients"{
-		_, cy := v.Cursor()
-		vb, _ := v.Line(cy)
-		client = vb
-		establishProjectsGivenClient()
+		cx, cy := v.Cursor()
+		for cy >= len(cs){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		clientPos = cy
+		refreshProjects(g,v)
+	}
+	if v.Name()=="projects_name" || v.Name()=="projects_client" {
+		cx, cy := v.Cursor()
+		for cy >= len(psGivenClient){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		projectPos = psGivenClient[cy]
 		refreshProjects(g,v)
 	}
 	return err
@@ -967,7 +862,7 @@ func guiPreviousEntryView(g *gocui.Gui, v *gocui.View) error {
 	v.Highlight = false
 	switch {
 		case v.Name()=="entries_rate":
-			v, err = g.SetCurrentView("entries_status")
+			v, err = g.SetCurrentView("entries_info")
 		case v.Name()=="entries_start":
 			v, err = g.SetCurrentView("entries_rate")
 		case v.Name()=="entries_end":
@@ -978,53 +873,42 @@ func guiPreviousEntryView(g *gocui.Gui, v *gocui.View) error {
 			v, err = g.SetCurrentView("entries_category")
 		case v.Name()=="entries_info":
 			v, err = g.SetCurrentView("entries_subcategory")
-		case v.Name()=="entries_status":
-			v, err = g.SetCurrentView("entries_info")
 		case v.Name()=="clients":
-			v, err = g.SetCurrentView("projects_client")
+			v, err = g.SetCurrentView("projects_moneyreceived")
 		case v.Name()=="projects_name":
 			v, err = g.SetCurrentView("clients")
 		case v.Name()=="projects_client":
 			v, err = g.SetCurrentView("projects_name")
+		case v.Name()=="projects_billed":
+			v, err = g.SetCurrentView("projects_client")
+		case v.Name()=="projects_month":
+			v, err = g.SetCurrentView("projects_billed")
+		case v.Name()=="projects_moneybilled":
+			v, err = g.SetCurrentView("projects_month")
+		case v.Name()=="projects_moneyreceived":
+			v, err = g.SetCurrentView("projects_moneybilled")
 	}
 	v.Highlight = true
 	v.SetCursor(cx, cy)
 
 	if v.Name()=="clients"{
-		_, cy := v.Cursor()
-		vb, _ := v.Line(cy)
-		client = vb
-		establishProjectsGivenClient()
+		cx, cy := v.Cursor()
+		for cy >= len(cs){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		clientPos = cy
 		refreshProjects(g,v)
 	}
-	return err
-}
-
-func refreshProjects(g *gocui.Gui, v *gocui.View) error {
-	var err error
-	original := v.Name()
-	establishProjectsGivenClient()
-
-	v, err = g.SetCurrentView("clients")
-	printClients(v)
-
-	for i, n := range [...]string{"projects_name", "projects_client"}   {
-		v, err = g.SetCurrentView(n)
-		printProjects_val(v,i)
+	if v.Name()=="projects_name" || v.Name()=="projects_client" {
+		cx, cy := v.Cursor()
+		for cy >= len(psGivenClient){
+			v.SetCursor(cx, cy-1)
+			cy = cy - 1
+		}
+		projectPos = psGivenClient[cy]
+		refreshProjects(g,v)
 	}
-	v, err = g.SetCurrentView(original)
-	return err
-
-}
-
-func refreshEntries(g *gocui.Gui, v *gocui.View) error {
-	var err error
-	original := v.Name()
-	for i, n := range [...]string{"entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_status","entries_money"}   {
-		v, err = g.SetCurrentView(n)
-		printEntries_val(v,i)
-	}
-	v, err = g.SetCurrentView(original)
 	return err
 }
 
@@ -1081,7 +965,7 @@ func displayEntries(g *gocui.Gui, v *gocui.View) error {
 		v.SelFgColor = gocui.ColorBlack
 	}
 
-	if v, err = g.SetView("entries_info", 71, -1, maxX-10, maxY-5); err != nil {
+	if v, err = g.SetView("entries_info", 71, -1, maxX-8, maxY-5); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
@@ -1091,21 +975,12 @@ func displayEntries(g *gocui.Gui, v *gocui.View) error {
 		v.SelFgColor = gocui.ColorBlack
 	}
 
-	if v, err = g.SetView("entries_status", maxX-10, -1, maxX-8, maxY-5); err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		printEntries_val(v,6)
-		//v.Highlight = true
-		v.SelBgColor = gocui.ColorGreen
-		v.SelFgColor = gocui.ColorBlack
-	}
 
 	if v, err = g.SetView("entries_money", maxX-8, -1, maxX, maxY-5); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
-		printEntries_val(v,7)
+		printEntries_val(v,6)
 		//v.Highlight = true
 		v.SelBgColor = gocui.ColorGreen
 		v.SelFgColor = gocui.ColorBlack
@@ -1133,15 +1008,15 @@ func verifyEditable(v *gocui.View) bool {
 	_, cy := v.Cursor()
 
 	switch {
-		case v.Name()=="projects_name":
-			if(cy<len(ps)){
+		case v.Name()=="projects_name" || v.Name()=="projects_client":
+			if(cy<len(psGivenClient)){
 				projectPos=psGivenClient[cy]
 				return true
 			} else {
 				return false
 			}
 		default:
-			if(cy<len(es)){
+			if(cy<len(u.Projects[projectPos].Entries)){
 				entryPos=cy
 				return true
 			} else {
@@ -1163,15 +1038,15 @@ func guiEdit(g *gocui.Gui, v *gocui.View) error {
 
 	if(editing=="entries_status"){
 		switch {
-		case es[entryPos].Status=="":
-			es[entryPos].Status="B"
-		case es[entryPos].Status=="B":
-			es[entryPos].Status="+"
-		case es[entryPos].Status=="+":
-			es[entryPos].Status=""
+		case u.Projects[projectPos].Entries[entryPos].Status=="":
+			u.Projects[projectPos].Entries[entryPos].Status="B"
+		case u.Projects[projectPos].Entries[entryPos].Status=="B":
+			u.Projects[projectPos].Entries[entryPos].Status="+"
+		case u.Projects[projectPos].Entries[entryPos].Status=="+":
+			u.Projects[projectPos].Entries[entryPos].Status=""
 		}
 		//es[entryPos].Status=""
-		uploadEntry()
+		uploadUser()
 		refreshEntries(g,v)
 		return nil
 	}
@@ -1189,7 +1064,7 @@ func guiEdit(g *gocui.Gui, v *gocui.View) error {
 
 		switch {
 		case editing=="projects_name":
-			fmt.Fprint(v,ps[projectPos].Name)
+			fmt.Fprint(v,u.Projects[projectPos].Name)
 		case editing=="entries_rate":
 			fmt.Fprint(v,EntryToRow()[0])
 		case editing=="entries_start":
@@ -1212,45 +1087,39 @@ func guiEditConfirm(g *gocui.Gui, v *gocui.View) error {
 	var err error
 	_, cy := v.Cursor()
 	vb, _ := v.Line(cy)
+	vb = strings.Replace(vb, "\u0000", "", -1)
 
 	switch {
 		case editing=="projects_name":
-			ps[projectPos].Name = vb
-			uploadProject()
+			u.Projects[projectPos].Name = vb
 		case editing=="projects_client":
-			ps[projectPos].Client = vb
-			uploadProject()
+			u.Projects[projectPos].Client = vb
 		case editing=="entries_rate":
-			es[entryPos].Rate, _ = strconv.Atoi(vb)
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].Rate, _ = strconv.Atoi(vb)
 		case editing=="entries_start":
 			r, _ := regexp.Compile("[ ]*([0-9]*)[ ]*/[ ]*([0-9]*)[ ]*/[ ]*([0-9]*)[ ]*([0-9]*)[ ]*:[ ]*([0-9]*)[ ]*")
 			x := r.FindStringSubmatch(vb)
-			es[entryPos].StartYear, _ = strconv.Atoi(x[1])
-			es[entryPos].StartMonth, _ = strconv.Atoi(x[2])
-			es[entryPos].StartDay, _ = strconv.Atoi(x[3])
-			es[entryPos].StartHour, _ = strconv.Atoi(x[4])
-			es[entryPos].StartMin, _ = strconv.Atoi(x[5])
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].StartYear, _ = strconv.Atoi(x[1])
+			u.Projects[projectPos].Entries[entryPos].StartMonth, _ = strconv.Atoi(x[2])
+			u.Projects[projectPos].Entries[entryPos].StartDay, _ = strconv.Atoi(x[3])
+			u.Projects[projectPos].Entries[entryPos].StartHour, _ = strconv.Atoi(x[4])
+			u.Projects[projectPos].Entries[entryPos].StartMin, _ = strconv.Atoi(x[5])
 		case editing=="entries_end":
 			r, _ := regexp.Compile("[ ]*([0-9]*)[ ]*/[ ]*([0-9]*)[ ]*/[ ]*([0-9]*)[ ]*([0-9]*)[ ]*:[ ]*([0-9]*)[ ]*")
 			x := r.FindStringSubmatch(vb)
-			es[entryPos].EndYear, _ = strconv.Atoi(x[1])
-			es[entryPos].EndMonth, _ = strconv.Atoi(x[2])
-			es[entryPos].EndDay, _ = strconv.Atoi(x[3])
-			es[entryPos].EndHour, _ = strconv.Atoi(x[4])
-			es[entryPos].EndMin, _ = strconv.Atoi(x[5])
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].EndYear, _ = strconv.Atoi(x[1])
+			u.Projects[projectPos].Entries[entryPos].EndMonth, _ = strconv.Atoi(x[2])
+			u.Projects[projectPos].Entries[entryPos].EndDay, _ = strconv.Atoi(x[3])
+			u.Projects[projectPos].Entries[entryPos].EndHour, _ = strconv.Atoi(x[4])
+			u.Projects[projectPos].Entries[entryPos].EndMin, _ = strconv.Atoi(x[5])
 		case editing=="entries_category":
-			es[entryPos].Category = vb
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].Category = vb
 		case editing=="entries_subcategory":
-			es[entryPos].Subcategory = vb
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].Subcategory = vb
 		case editing=="entries_info":
-			es[entryPos].Info = vb
-			uploadEntry()
+			u.Projects[projectPos].Entries[entryPos].Info = vb
 	}
+	uploadUser()
 
 	if err = g.DeleteView("editing"); err != nil {
 		return err
@@ -1285,7 +1154,7 @@ func guiEsc(g *gocui.Gui, v *gocui.View) error {
 				return err
 			}
 		default:
-			for _, i := range [...]string{"entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_status","entries_money"}   {
+			for _, i := range [...]string{"entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_money"}   {
 				if err := g.DeleteView(i); err != nil {
 					return err
 				}
@@ -1293,91 +1162,6 @@ func guiEsc(g *gocui.Gui, v *gocui.View) error {
 			if _, err := g.SetCurrentView("projects_name"); err != nil {
 				return err
 			}
-	}
-	return nil
-}
-
-
-
-func guiCreateEditProjectName(g *gocui.Gui, v *gocui.View) error {
-	if(!verifyEditable(v)){
-		return nil
-	}
-
-	maxX, maxY := g.Size()
-	if v, err := g.SetView("editprojectname", maxX/2-30, maxY/2, maxX/2+30, maxY/2+2); err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		v.Editable = true
-
-		if _, err := g.SetCurrentView("editprojectname"); err != nil {
-			return err
-		}
-		fmt.Fprint(v,ps[projectPos].Name)
-	}
-	return nil
-}
-
-func guiDelEditProjectName(g *gocui.Gui, v *gocui.View) error {
-	var err error
-	_, cy := v.Cursor()
-	vb, _ := v.Line(cy)
-	ps[projectPos].Name = vb
-	uploadProject()
-
-	if err = g.DeleteView("editprojectname"); err != nil {
-		return err
-	}
-	if v, err = g.SetCurrentView("projects_name"); err != nil {
-		return err
-	}
-	printProjectsx(v)
-	return nil
-}
-
-func guiCreateDeleteProject(g *gocui.Gui, v *gocui.View) error {
-	if(!verifyEditable(v)){
-		return nil
-	}
-
-	maxX, maxY := g.Size()
-	if v, err := g.SetView("deleteproject", maxX/2-30, maxY/2, maxX/2+30, maxY/2+2); err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		v.Editable = true
-
-		if _, err := g.SetCurrentView("deleteproject"); err != nil {
-			return err
-		}
-		fmt.Fprint(v,"Confirm deletion")
-	}
-	return nil
-}
-
-func guiConfirmedDeleteProject(g *gocui.Gui, v *gocui.View) error {
-	var err error
-
-	deleteProject()
-
-	if err = g.DeleteView("deleteproject"); err != nil {
-		return err
-	}
-	if v, err = g.SetCurrentView("projects_name"); err != nil {
-		return err
-	}
-	printProjectsx(v)
-	return nil
-}
-
-func guiEscapeDeleteProject(g *gocui.Gui, v *gocui.View) error {
-
-	if err := g.DeleteView("deleteproject"); err != nil {
-		return err
-	}
-	if _, err := g.SetCurrentView("projects_name"); err != nil {
-		return err
 	}
 	return nil
 }
@@ -1411,7 +1195,7 @@ func guiDelete(g *gocui.Gui, v *gocui.View) error {
 func guiDeleteConfirm(g *gocui.Gui, v *gocui.View) error {
 	var err error
 
-	if editing=="projects_name" {
+	if editing=="projects_name" || editing=="projects_client" {
 		deleteProject()
 	} else {
 		deleteEntry()
@@ -1424,8 +1208,8 @@ func guiDeleteConfirm(g *gocui.Gui, v *gocui.View) error {
 		return err
 	}
 
-	if editing=="projects_name" {
-		printProjectsx(v)
+	if editing=="projects_name" || editing=="projects_client" {
+		refreshProjects(g,v)
 	} else {
 		refreshEntries(g,v)
 	}
@@ -1467,7 +1251,7 @@ func keybindings(g *gocui.Gui) error {
 		}
 	}
 
-	for _, i := range [...]string{"clients","projects_name","projects_client","entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_status"}   {
+	for _, i := range [...]string{"clients","projects_name","projects_client","projects_billed","projects_month","projects_moneybilled","projects_moneyreceived","entries_rate", "entries_start", "entries_end", "entries_category", "entries_subcategory","entries_info","entries_status"}   {
 		if err := g.SetKeybinding(i, gocui.KeyArrowLeft, gocui.ModNone, guiPreviousEntryView); err != nil {
 			return err
 		}
@@ -1545,25 +1329,61 @@ func layout(g *gocui.Gui) error {
 		v.Highlight = false
 		v.SelBgColor = gocui.ColorGreen
 		v.SelFgColor = gocui.ColorBlack
-		printClients(v)
+
 	}
-	if v, err := g.SetView("projects_name", 21, -1, maxX-20, maxY-5); err != nil {
+	if v, err := g.SetView("projects_name", 21, -1, maxX-52, maxY-5); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
-		v.Highlight = true
+		v.Highlight = false
 		v.SelBgColor = gocui.ColorGreen
 		v.SelFgColor = gocui.ColorBlack
-		printProjects_val(v,0)
+
 	}
-	if v, err := g.SetView("projects_client", maxX-20, -1, maxX, maxY-5); err != nil {
+	if v, err := g.SetView("projects_client", maxX-52, -1, maxX-32, maxY-5); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
-		v.Highlight = true
+		v.Highlight = false
 		v.SelBgColor = gocui.ColorGreen
 		v.SelFgColor = gocui.ColorBlack
-		printProjects_val(v,1)
+
+	}
+	if v, err := g.SetView("projects_billed", maxX-32, -1, maxX-30, maxY-5); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Highlight = false
+		v.SelBgColor = gocui.ColorGreen
+		v.SelFgColor = gocui.ColorBlack
+
+	}
+	if v, err := g.SetView("projects_month", maxX-30, -1, maxX-20, maxY-5); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Highlight = false
+		v.SelBgColor = gocui.ColorGreen
+		v.SelFgColor = gocui.ColorBlack
+
+	}
+	if v, err := g.SetView("projects_moneybilled", maxX-20, -1, maxX-10, maxY-5); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Highlight = false
+		v.SelBgColor = gocui.ColorGreen
+		v.SelFgColor = gocui.ColorBlack
+
+	}
+	if v, err := g.SetView("projects_moneyreceived", maxX-10, -1, maxX, maxY-5); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Highlight = false
+		v.SelBgColor = gocui.ColorGreen
+		v.SelFgColor = gocui.ColorBlack
+
 	}
 	if v, err := g.SetView("status", -1, maxY-5, maxX, maxY); err != nil {
 		if err != gocui.ErrUnknownView {
@@ -1576,15 +1396,31 @@ func layout(g *gocui.Gui) error {
 		fmt.Fprintf(v, "%s", b)
 		v.Editable = true
 		v.Wrap = true
+
+		refreshProjects(g,v)
 		if _, err := g.SetCurrentView("projects_name"); err != nil {
 			return err
 		}
+
+
 	}
+
+
+
 	return nil
 }
 
-func main() {
-	loginInternal("r@rwhite.no", "hello")
+func mainx() {
+	if readUser() {
+		loginInternal(u.Email, u.Password)
+		if u.LoggedIn == false {
+			readUser()
+			createUser()
+		}
+	} else {
+		createUser()
+	}
+
 	genPDF()
 
 	g, err := gocui.NewGui(gocui.OutputNormal)
@@ -1608,8 +1444,17 @@ func main() {
 	fmt.Println(time.Now().Local())
 }
 
-func main1() {
-	loginInternal("r@rwhite.no", "hello")
+func main() {
+	if readUser() {
+		loginInternal(u.Email, u.Password)
+		if u.LoggedIn == false {
+			readUser()
+			createUser()
+		}
+	} else {
+		createUser()
+	}
+
 	genPDF()
-	fmt.Println(time.Now().Local())
 }
+
