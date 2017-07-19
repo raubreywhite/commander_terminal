@@ -1410,7 +1410,7 @@ func layout(g *gocui.Gui) error {
 	return nil
 }
 
-func mainx() {
+func main() {
 	if readUser() {
 		loginInternal(u.Email, u.Password)
 		if u.LoggedIn == false {
@@ -1444,7 +1444,7 @@ func mainx() {
 	fmt.Println(time.Now().Local())
 }
 
-func main() {
+func mainx() {
 	if readUser() {
 		loginInternal(u.Email, u.Password)
 		if u.LoggedIn == false {
